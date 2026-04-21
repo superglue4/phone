@@ -24,6 +24,7 @@ struct ContentView: View {
     @State private var gpxSearchText = ""
     @State private var debouncedSearchText = ""
     @StateObject private var locationManager = LocationManager()
+    @StateObject private var watchBridge = PhoneWatchBridge.shared
 
     var body: some View {
         VStack(spacing: 12) {
@@ -291,6 +292,7 @@ struct ContentView: View {
             routeSegments = segments
             isFollowingUserLocation = false
             cameraTarget = .mapRect(Self.mapRect(for: points))
+            watchBridge.sendRoute(name: file.displayName, segments: segments)
             loadMessage = "\(file.cleanedRelativePath)에서 \(segments.count)개 경로, \(points.count)개 좌표를 표시했습니다."
         } catch {
             routeSegments = []
