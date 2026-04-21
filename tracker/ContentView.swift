@@ -6,17 +6,32 @@
 //
 
 import SwiftUI
+import Foundation
 import MapKit
 
 struct ContentView: View {
     @State private var routeCoordinates: [CLLocationCoordinate2D] = []
+    @State private var cameraPosition: MapCameraPosition = .automatic
     @State private var loadMessage = "sample.gpx를 프로젝트에 추가하면 경로가 표시됩니다."
 
     var body: some View {
         VStack(spacing: 12) {
-            GPXMapView(coordinates: routeCoordinates)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .clipShape(RoundedRectangle(cornerRadius: 16))
+            Map(position: $cameraPosition) {
+                if routeCoordinates.count == 1, let coordinate = routeCoordinates.first {
+                    Marker("Start", coordinate: coordinate)
+                }
+
+                if routeCoordinates.count >= 2 {
+                    MapPolyline(coordinates: routeCoordinates)
+                        .stroke(.blue, lineWidth: 4)
+
+                    Marker("Start", coordinate: routeCoordinates[0])
+                    Marker("End", coordinate: routeCoordinates[routeCoordinates.count - 1])
+                }
+            }
+            .mapStyle(.standard)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .clipShape(RoundedRectangle(cornerRadius: 16))
 
             Text(loadMessage)
                 .font(.footnote)
@@ -44,64 +59,26 @@ struct ContentView: View {
             }
 
             routeCoordinates = points
+            cameraPosition = .rect(Self.mapRect(for: points))
             loadMessage = "총 \(points.count)개 좌표를 지도에 표시했습니다."
         } catch {
             loadMessage = "GPX 파싱 실패: \(error.localizedDescription)"
         }
     }
-}
 
-private struct GPXMapView: UIViewRepresentable {
-    let coordinates: [CLLocationCoordinate2D]
+    private static func mapRect(for coordinates: [CLLocationCoordinate2D]) -> MKMapRect {
+        let points = coordinates.map(MKMapPoint.init)
 
-    func makeUIView(context: Context) -> MKMapView {
-        let mapView = MKMapView()
-        mapView.delegate = context.coordinator
-        mapView.showsCompass = true
-        mapView.pointOfInterestFilter = .excludingAll
-        return mapView
-    }
-
-    func updateUIView(_ mapView: MKMapView, context: Context) {
-        mapView.removeOverlays(mapView.overlays)
-
-        guard coordinates.count >= 2 else {
-            if let coordinate = coordinates.first {
-                mapView.setRegion(
-                    MKCoordinateRegion(
-                        center: coordinate,
-                        span: MKCoordinateSpan(latitudeDelta: 0.01, longitudeDelta: 0.01)
-                    ),
-                    animated: true
-                )
-            }
-            return
+        guard var rect = points.first.map({ MKMapRect(origin: $0, size: MKMapSize(width: 0, height: 0)) }) else {
+            return .world
         }
 
-        let polyline = MKPolyline(coordinates: coordinates, count: coordinates.count)
-        mapView.addOverlay(polyline)
-        mapView.setVisibleMapRect(
-            polyline.boundingMapRect,
-            edgePadding: UIEdgeInsets(top: 40, left: 20, bottom: 40, right: 20),
-            animated: true
-        )
-    }
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator()
-    }
-
-    final class Coordinator: NSObject, MKMapViewDelegate {
-        func mapView(_ mapView: MKMapView, rendererFor overlay: MKOverlay) -> MKOverlayRenderer {
-            guard let polyline = overlay as? MKPolyline else {
-                return MKOverlayRenderer(overlay: overlay)
-            }
-
-            let renderer = MKPolylineRenderer(polyline: polyline)
-            renderer.strokeColor = .systemBlue
-            renderer.lineWidth = 4
-            return renderer
+        for point in points.dropFirst() {
+            let pointRect = MKMapRect(origin: point, size: MKMapSize(width: 0, height: 0))
+            rect = rect.union(pointRect)
         }
+
+        return rect.insetBy(dx: -rect.size.width * 0.2 - 500, dy: -rect.size.height * 0.2 - 500)
     }
 }
 
@@ -149,8 +126,4 @@ private final class GPXParser: NSObject, XMLParserDelegate {
 
         points.append(CLLocationCoordinate2D(latitude: latitude, longitude: longitude))
     }
-}
-
-#Preview {
-    ContentView()
 }
