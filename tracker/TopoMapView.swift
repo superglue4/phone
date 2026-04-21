@@ -49,10 +49,11 @@ struct TopoMapView: UIViewRepresentable {
             urlTemplate: "https://a.tile.opentopomap.org/{z}/{x}/{y}.png",
             cacheDirectory: cacheDir
         )
-        overlay.canReplaceMapContent = true
+        // Keep Apple's label layer above the raster tiles so place names remain readable.
+        overlay.canReplaceMapContent = false
         overlay.maximumZ = 17
         overlay.minimumZ = 1
-        map.addOverlay(overlay, level: .aboveLabels)
+        map.addOverlay(overlay, level: .aboveRoads)
 
         let pan = UIPanGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.userGestured(_:)))
         pan.delegate = context.coordinator
@@ -146,7 +147,9 @@ struct TopoMapView: UIViewRepresentable {
 
         func mapView(_ mapView: MKMapView, rendererFor overlay: MKOverlay) -> MKOverlayRenderer {
             if let tile = overlay as? MKTileOverlay {
-                return MKTileOverlayRenderer(tileOverlay: tile)
+                let renderer = MKTileOverlayRenderer(tileOverlay: tile)
+                renderer.alpha = 0.92
+                return renderer
             }
 
             if let polyline = overlay as? MKPolyline {
