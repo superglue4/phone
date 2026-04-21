@@ -17,8 +17,9 @@ struct ContentView: View {
     @State private var routeSegments: [[CLLocationCoordinate2D]] = []
     @State private var cameraPosition: MapCameraPosition = .automatic
     @State private var visibleSpan = MKCoordinateSpan(latitudeDelta: 0.01, longitudeDelta: 0.01)
-    @State private var loadMessage = "`gpx` 폴더를 프로젝트 리소스로 추가하면 목록이 표시됩니다."
+    @State private var loadMessage = "GPX를 선택하십시오."
     @State private var isFollowingUserLocation = true
+    @AppStorage("lastSelectedGPXPath") private var lastSelectedGPXPath: String = ""
     @State private var isShowingGPXPicker = false
     @State private var gpxSearchText = ""
     @State private var debouncedSearchText = ""
@@ -158,7 +159,7 @@ struct ContentView: View {
             } label: {
                 HStack(spacing: 8) {
                     Image(systemName: "map")
-                    Text(selectedFile?.cleanedRelativePath ?? "GPX 선택")
+                    Text(selectedFile?.cleanedRelativePath ?? "GPX를 선택하십시오")
                         .lineLimit(1)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -274,14 +275,21 @@ struct ContentView: View {
         do {
             gpxFiles = try GPXFileItem.discoverAll()
 
-            guard let first = gpxFiles.first else {
+            guard !gpxFiles.isEmpty else {
                 routeSegments = []
                 selectedFile = nil
                 loadMessage = "Xcode에서 `gpx` 폴더를 tracker 타깃 리소스로 추가하세요."
                 return
             }
 
-            loadGPXFile(first)
+            if !lastSelectedGPXPath.isEmpty,
+               let saved = gpxFiles.first(where: { $0.relativePath == lastSelectedGPXPath }) {
+                loadGPXFile(saved)
+            } else {
+                routeSegments = []
+                selectedFile = nil
+                loadMessage = "GPX를 선택하십시오."
+            }
         } catch {
             routeSegments = []
             selectedFile = nil
@@ -291,6 +299,7 @@ struct ContentView: View {
 
     private func loadGPXFile(_ file: GPXFileItem) {
         selectedFile = file
+        lastSelectedGPXPath = file.relativePath
 
         do {
             let parsed = try GPXParser.parse(contentsOf: file.url)
