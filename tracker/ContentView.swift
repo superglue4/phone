@@ -15,7 +15,7 @@ struct ContentView: View {
     @State private var gpxFiles: [GPXFileItem] = []
     @State private var selectedFile: GPXFileItem?
     @State private var routeSegments: [[CLLocationCoordinate2D]] = []
-    @State private var cameraPosition: MapCameraPosition = .automatic
+    @State private var cameraTarget: TopoMapView.CameraTarget?
     @State private var visibleSpan = MKCoordinateSpan(latitudeDelta: 0.01, longitudeDelta: 0.01)
     @State private var loadMessage = "GPX를 선택하십시오."
     @State private var isFollowingUserLocation = true
@@ -29,51 +29,27 @@ struct ContentView: View {
         VStack(spacing: 12) {
             controlsBar
 
-            Map(position: $cameraPosition, interactionModes: .all) {
-                if let userCoordinate = locationManager.coordinate {
-                    Annotation("내 위치", coordinate: userCoordinate) {
-                        ZStack {
-                            Circle()
-                                .fill(.blue.opacity(0.18))
-                                .frame(width: 28, height: 28)
-
-                            Circle()
-                                .fill(.blue)
-                                .frame(width: 14, height: 14)
-                                .overlay {
-                                    Circle()
-                                        .stroke(.white, lineWidth: 3)
-                                }
+            ZStack(alignment: .bottomTrailing) {
+                TopoMapView(
+                    segments: routeSegments,
+                    userCoordinate: locationManager.coordinate,
+                    cameraTarget: cameraTarget,
+                    onRegionChange: { region in
+                        visibleSpan = region.span
+                    },
+                    onUserInteraction: {
+                        if isFollowingUserLocation {
+                            isFollowingUserLocation = false
                         }
                     }
-                }
+                )
 
-                if flattenedRouteCoordinates.count == 1, let coordinate = flattenedRouteCoordinates.first {
-                    Marker("Start", coordinate: coordinate)
-                }
-
-                ForEach(Array(routeSegments.enumerated()), id: \.offset) { _, segment in
-                    if segment.count >= 2 {
-                        MapPolyline(coordinates: segment)
-                            .stroke(.blue, lineWidth: 4)
-                    }
-                }
-
-                if let start = flattenedRouteCoordinates.first {
-                    Marker("Start", coordinate: start)
-                }
-
-                if flattenedRouteCoordinates.count >= 2, let end = flattenedRouteCoordinates.last {
-                    Marker("End", coordinate: end)
-                }
-            }
-            .mapStyle(.standard)
-            .mapControls {
-                MapCompass()
-                MapScaleView()
-            }
-            .onMapCameraChange(frequency: .continuous) { context in
-                visibleSpan = context.region.span
+                Text("© OpenTopoMap · © OpenStreetMap")
+                    .font(.caption2)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 4))
+                    .padding(6)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .clipShape(RoundedRectangle(cornerRadius: 16))
@@ -314,7 +290,7 @@ struct ContentView: View {
 
             routeSegments = segments
             isFollowingUserLocation = false
-            cameraPosition = .rect(Self.mapRect(for: points))
+            cameraTarget = .mapRect(Self.mapRect(for: points))
             loadMessage = "\(file.cleanedRelativePath)에서 \(segments.count)개 경로, \(points.count)개 좌표를 표시했습니다."
         } catch {
             routeSegments = []
@@ -361,7 +337,7 @@ struct ContentView: View {
             return
         }
 
-        cameraPosition = .region(
+        cameraTarget = .region(
             MKCoordinateRegion(
                 center: coordinate,
                 span: visibleSpan
