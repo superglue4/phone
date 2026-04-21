@@ -8,76 +8,266 @@
 import SwiftUI
 import Foundation
 import MapKit
+import CoreLocation
+import Combine
 
 struct ContentView: View {
     @State private var gpxFiles: [GPXFileItem] = []
     @State private var selectedFile: GPXFileItem?
-    @State private var routeCoordinates: [CLLocationCoordinate2D] = []
+    @State private var routeSegments: [[CLLocationCoordinate2D]] = []
     @State private var cameraPosition: MapCameraPosition = .automatic
+    @State private var visibleSpan = MKCoordinateSpan(latitudeDelta: 0.01, longitudeDelta: 0.01)
     @State private var loadMessage = "`gpx` 폴더를 프로젝트 리소스로 추가하면 목록이 표시됩니다."
+    @State private var isFollowingUserLocation = true
+    @State private var isShowingGPXPicker = false
+    @State private var gpxSearchText = ""
+    @State private var debouncedSearchText = ""
+    @StateObject private var locationManager = LocationManager()
 
     var body: some View {
         VStack(spacing: 12) {
-            HStack {
-                Menu {
-                    if gpxFiles.isEmpty {
-                        Text("gpx 폴더에서 파일을 찾지 못했습니다.")
-                    } else {
-                        ForEach(groupedFiles.keys.sorted(), id: \.self) { group in
-                            Section(group) {
-                                ForEach(groupedFiles[group] ?? []) { file in
-                                    Button(file.displayName) {
-                                        loadGPXFile(file)
+            controlsBar
+
+            Map(position: $cameraPosition, interactionModes: .all) {
+                if let userCoordinate = locationManager.coordinate {
+                    Annotation("내 위치", coordinate: userCoordinate) {
+                        ZStack {
+                            Circle()
+                                .fill(.blue.opacity(0.18))
+                                .frame(width: 28, height: 28)
+
+                            Circle()
+                                .fill(.blue)
+                                .frame(width: 14, height: 14)
+                                .overlay {
+                                    Circle()
+                                        .stroke(.white, lineWidth: 3)
+                                }
+                        }
+                    }
+                }
+
+                if flattenedRouteCoordinates.count == 1, let coordinate = flattenedRouteCoordinates.first {
+                    Marker("Start", coordinate: coordinate)
+                }
+
+                ForEach(Array(routeSegments.enumerated()), id: \.offset) { _, segment in
+                    if segment.count >= 2 {
+                        MapPolyline(coordinates: segment)
+                            .stroke(.blue, lineWidth: 4)
+                    }
+                }
+
+                if let start = flattenedRouteCoordinates.first {
+                    Marker("Start", coordinate: start)
+                }
+
+                if flattenedRouteCoordinates.count >= 2, let end = flattenedRouteCoordinates.last {
+                    Marker("End", coordinate: end)
+                }
+            }
+            .mapStyle(.standard)
+            .mapControls {
+                MapCompass()
+                MapScaleView()
+            }
+            .onMapCameraChange(frequency: .continuous) { context in
+                visibleSpan = context.region.span
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .clipShape(RoundedRectangle(cornerRadius: 16))
+        }
+        .padding()
+        .task {
+            discoverGPXFiles()
+            locationManager.requestWhenInUseAuthorization()
+            locationManager.startUpdatingLocation()
+        }
+        .onReceive(locationManager.$coordinate) { _ in
+            guard isFollowingUserLocation else {
+                return
+            }
+
+            moveCameraToUserLocation()
+        }
+        .onChange(of: gpxSearchText) { _, newValue in
+            scheduleSearchDebounce(for: newValue)
+        }
+        .sheet(isPresented: $isShowingGPXPicker) {
+            NavigationStack {
+                List {
+                    Section(filteredFilesTitle) {
+                        if isSearchEmpty {
+                            Text("검색어를 입력하면 GPX 파일이 1개씩 표시됩니다.")
+                                .foregroundStyle(.secondary)
+                        } else if filteredFiles.isEmpty {
+                            Text("검색 결과가 없습니다.")
+                                .foregroundStyle(.secondary)
+                        } else {
+                            ForEach(filteredFiles) { file in
+                                Button {
+                                    loadGPXFile(file)
+                                    isShowingGPXPicker = false
+                                } label: {
+                                    HStack {
+                                        VStack(alignment: .leading, spacing: 4) {
+                                            Text(file.displayName)
+                                                .foregroundStyle(.primary)
+                                            Text(file.cleanedRelativePath)
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                        }
+
+                                        Spacer()
+
+                                        if selectedFile == file {
+                                            Image(systemName: "checkmark.circle.fill")
+                                                .foregroundStyle(.blue)
+                                        }
                                     }
                                 }
                             }
                         }
                     }
-                } label: {
-                    Label(selectedFile?.relativePath ?? "GPX 파일 선택", systemImage: "folder")
+                }
+                .navigationTitle("GPX 선택")
+                .searchable(text: $gpxSearchText, prompt: "대분류, 중분류, 파일 검색")
+                .toolbar {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button("닫기") {
+                            isShowingGPXPicker = false
+                        }
+                    }
+                }
+            }
+            .presentationDetents([.medium, .large])
+        }
+        .safeAreaInset(edge: .bottom) {
+            bottomStatusPanel
+                .padding(.horizontal)
+                .padding(.bottom, 8)
+        }
+    }
+
+    private var controlsBar: some View {
+        HStack(spacing: 8) {
+            Button {
+                gpxSearchText = ""
+                debouncedSearchText = ""
+                isShowingGPXPicker = true
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "map")
+                    Text(selectedFile?.cleanedRelativePath ?? "GPX 선택")
                         .lineLimit(1)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .buttonStyle(.bordered)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+            }
+            .buttonStyle(.borderedProminent)
+
+            Button {
+                isFollowingUserLocation = true
+                locationManager.startUpdatingLocation()
+                moveCameraToUserLocation()
+            } label: {
+                Label("내 위치", systemImage: "location.fill")
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
+            }
+            .buttonStyle(.bordered)
+        }
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
+        .contentShape(RoundedRectangle(cornerRadius: 14))
+        .zIndex(1)
+    }
+
+    private var filteredFiles: [GPXFileItem] {
+        let keyword = normalizedSearchText(debouncedSearchText)
+
+        guard !keyword.isEmpty else {
+            return []
+        }
+
+        return gpxFiles.filter { file in
+            file.normalizedSearchText.contains(keyword)
+        }
+    }
+
+    private var isSearchEmpty: Bool {
+        normalizedSearchText(debouncedSearchText).isEmpty
+    }
+
+    private var filteredFilesTitle: String {
+        isSearchEmpty ? "GPX 검색" : "검색 결과 \(filteredFiles.count)건"
+    }
+
+    private var flattenedRouteCoordinates: [CLLocationCoordinate2D] {
+        routeSegments.filter { $0.count >= 2 }.flatMap { $0 }
+    }
+
+    private var bottomStatusPanel: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Label(selectedFile?.displayName ?? "선택된 GPX 없음", systemImage: "point.topleft.down.curvedto.point.bottomright.up")
+                    .font(.subheadline.weight(.semibold))
+                    .lineLimit(1)
+
+                Spacer()
 
                 if let selectedFile {
-                    Button("다시 읽기") {
+                    Button {
                         loadGPXFile(selectedFile)
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
                     }
                     .buttonStyle(.bordered)
+                    .controlSize(.small)
                 }
             }
 
-            Map(position: $cameraPosition) {
-                if routeCoordinates.count == 1, let coordinate = routeCoordinates.first {
-                    Marker("Start", coordinate: coordinate)
-                }
+            Text(selectedFile?.cleanedRelativePath ?? "GPX 파일을 선택하면 경로를 표시합니다.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
 
-                if routeCoordinates.count >= 2 {
-                    MapPolyline(coordinates: routeCoordinates)
-                        .stroke(.blue, lineWidth: 4)
+            Divider()
 
-                    Marker("Start", coordinate: routeCoordinates[0])
-                    Marker("End", coordinate: routeCoordinates[routeCoordinates.count - 1])
-                }
-            }
-            .mapStyle(.standard)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .clipShape(RoundedRectangle(cornerRadius: 16))
+            Text(locationStatusText)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
 
             Text(loadMessage)
                 .font(.footnote)
                 .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding()
-        .task {
-            discoverGPXFiles()
-        }
+        .padding(14)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18))
     }
 
-    private var groupedFiles: [String: [GPXFileItem]] {
-        Dictionary(grouping: gpxFiles, by: \.groupName)
+    private var locationStatusText: String {
+        switch locationManager.authorizationStatus {
+        case .notDetermined:
+            return "위치 권한을 요청하는 중입니다."
+        case .restricted:
+            return "이 기기에서는 위치 접근이 제한되어 있습니다."
+        case .denied:
+            return "위치 권한이 거부되었습니다. 설정에서 tracker 위치 권한을 허용하세요."
+        case .authorizedAlways, .authorizedWhenInUse:
+            if let coordinate = locationManager.coordinate {
+                let modeText = isFollowingUserLocation ? "자동 추적 중" : "지도는 수동 조작 중"
+                return String(format: "현재 위치: %.6f, %.6f", coordinate.latitude, coordinate.longitude) + " · \(modeText)"
+            }
+
+            if let errorMessage = locationManager.lastErrorMessage {
+                return "현재 위치를 가져오지 못했습니다: \(errorMessage)"
+            }
+
+            return "GPS에서 현재 위치를 읽는 중입니다."
+        @unknown default:
+            return "위치 상태를 확인할 수 없습니다."
+        }
     }
 
     private func discoverGPXFiles() {
@@ -85,7 +275,7 @@ struct ContentView: View {
             gpxFiles = try GPXFileItem.discoverAll()
 
             guard let first = gpxFiles.first else {
-                routeCoordinates = []
+                routeSegments = []
                 selectedFile = nil
                 loadMessage = "Xcode에서 `gpx` 폴더를 tracker 타깃 리소스로 추가하세요."
                 return
@@ -93,7 +283,7 @@ struct ContentView: View {
 
             loadGPXFile(first)
         } catch {
-            routeCoordinates = []
+            routeSegments = []
             selectedFile = nil
             loadMessage = "GPX 목록 읽기 실패: \(error.localizedDescription)"
         }
@@ -103,21 +293,71 @@ struct ContentView: View {
         selectedFile = file
 
         do {
-            let points = try GPXParser.parse(contentsOf: file.url)
+            let parsed = try GPXParser.parse(contentsOf: file.url)
+            let segments = Self.splitLargeGaps(in: parsed)
+            let points = segments.filter { $0.count >= 2 }.flatMap { $0 }
 
             guard !points.isEmpty else {
-                routeCoordinates = []
-                loadMessage = "\(file.relativePath): trkpt 좌표가 없습니다."
+                routeSegments = []
+                loadMessage = "\(file.cleanedRelativePath): trkpt 좌표가 없습니다."
                 return
             }
 
-            routeCoordinates = points
+            routeSegments = segments
+            isFollowingUserLocation = false
             cameraPosition = .rect(Self.mapRect(for: points))
-            loadMessage = "\(file.relativePath)에서 \(points.count)개 좌표를 표시했습니다."
+            loadMessage = "\(file.cleanedRelativePath)에서 \(segments.count)개 경로, \(points.count)개 좌표를 표시했습니다."
         } catch {
-            routeCoordinates = []
-            loadMessage = "\(file.relativePath) 파싱 실패: \(error.localizedDescription)"
+            routeSegments = []
+            loadMessage = "\(file.cleanedRelativePath) 파싱 실패: \(error.localizedDescription)"
         }
+    }
+
+    private static func splitLargeGaps(
+        in segments: [[CLLocationCoordinate2D]],
+        maxGapMeters: Double = 500
+    ) -> [[CLLocationCoordinate2D]] {
+        var result: [[CLLocationCoordinate2D]] = []
+
+        for segment in segments {
+            guard segment.count > 1 else {
+                result.append(segment)
+                continue
+            }
+
+            var current: [CLLocationCoordinate2D] = [segment[0]]
+
+            for i in 1..<segment.count {
+                let prev = CLLocation(latitude: segment[i - 1].latitude, longitude: segment[i - 1].longitude)
+                let next = CLLocation(latitude: segment[i].latitude, longitude: segment[i].longitude)
+
+                if prev.distance(from: next) > maxGapMeters {
+                    result.append(current)
+                    current = [segment[i]]
+                } else {
+                    current.append(segment[i])
+                }
+            }
+
+            if !current.isEmpty {
+                result.append(current)
+            }
+        }
+
+        return result
+    }
+
+    private func moveCameraToUserLocation() {
+        guard let coordinate = locationManager.coordinate else {
+            return
+        }
+
+        cameraPosition = .region(
+            MKCoordinateRegion(
+                center: coordinate,
+                span: visibleSpan
+            )
+        )
     }
 
     private static func mapRect(for coordinates: [CLLocationCoordinate2D]) -> MKMapRect {
@@ -134,18 +374,139 @@ struct ContentView: View {
 
         return rect.insetBy(dx: -rect.size.width * 0.2 - 500, dy: -rect.size.height * 0.2 - 500)
     }
+
+    private func scheduleSearchDebounce(for text: String) {
+        let latest = text
+
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(180))
+
+            guard latest == gpxSearchText else {
+                return
+            }
+
+            debouncedSearchText = latest
+        }
+    }
+
+    private func normalizedSearchText(_ text: String) -> String {
+        text
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 }
 
-private struct GPXFileItem: Identifiable, Hashable {
+@MainActor
+private final class LocationManager: NSObject, ObservableObject, CLLocationManagerDelegate {
+    @Published private(set) var coordinate: CLLocationCoordinate2D?
+    @Published private(set) var authorizationStatus: CLAuthorizationStatus
+    @Published private(set) var lastErrorMessage: String?
+
+    private let manager = CLLocationManager()
+
+    override init() {
+        authorizationStatus = manager.authorizationStatus
+        super.init()
+        manager.delegate = self
+        manager.desiredAccuracy = kCLLocationAccuracyBest
+    }
+
+    func requestWhenInUseAuthorization() {
+        if authorizationStatus == .notDetermined {
+            manager.requestWhenInUseAuthorization()
+        }
+    }
+
+    func requestCurrentLocation() {
+        lastErrorMessage = nil
+
+        switch authorizationStatus {
+        case .authorizedAlways, .authorizedWhenInUse:
+            manager.requestLocation()
+        case .notDetermined:
+            manager.requestWhenInUseAuthorization()
+        case .restricted, .denied:
+            lastErrorMessage = "권한이 없어 GPS를 사용할 수 없습니다."
+        @unknown default:
+            lastErrorMessage = "알 수 없는 위치 권한 상태입니다."
+        }
+    }
+
+    func startUpdatingLocation() {
+        lastErrorMessage = nil
+
+        switch authorizationStatus {
+        case .authorizedAlways, .authorizedWhenInUse:
+            manager.startUpdatingLocation()
+        case .notDetermined:
+            manager.requestWhenInUseAuthorization()
+        case .restricted, .denied:
+            lastErrorMessage = "권한이 없어 GPS를 사용할 수 없습니다."
+        @unknown default:
+            lastErrorMessage = "알 수 없는 위치 권한 상태입니다."
+        }
+    }
+
+    func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+        authorizationStatus = manager.authorizationStatus
+
+        if authorizationStatus == .authorizedAlways || authorizationStatus == .authorizedWhenInUse {
+            manager.startUpdatingLocation()
+        }
+    }
+
+    func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+        if let location = locations.last {
+            coordinate = location.coordinate
+        }
+    }
+
+    func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
+        lastErrorMessage = error.localizedDescription
+    }
+}
+
+nonisolated private struct GPXFileItem: Identifiable, Hashable {
     let relativePath: String
     let url: URL
+    let normalizedSearchText: String
 
     var id: String { relativePath }
-    var displayName: String { url.deletingPathExtension().lastPathComponent }
+    var pathComponents: [String] {
+        relativePath.split(separator: "/").map(String.init)
+    }
 
-    var groupName: String {
-        let folder = (relativePath as NSString).deletingLastPathComponent
-        return folder.isEmpty || folder == "." ? "기타" : folder
+    var displayName: String {
+        Self.cleanedFileName(url.deletingPathExtension().lastPathComponent)
+    }
+
+    var topLevelName: String {
+        pathComponents.first.map(Self.cleanedFolderName) ?? "기타"
+    }
+
+    var secondLevelName: String {
+        guard pathComponents.count >= 3 else {
+            return ""
+        }
+
+        return Self.cleanedFolderName(pathComponents[1])
+    }
+
+    var cleanedRelativePath: String {
+        var cleaned = [topLevelName]
+
+        if !secondLevelName.isEmpty {
+            cleaned.append(secondLevelName)
+        }
+
+        cleaned.append(displayName)
+        return cleaned.joined(separator: " / ")
+    }
+
+    var searchText: String {
+        [topLevelName, secondLevelName, displayName, cleanedRelativePath]
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
     }
 
     static func discoverAll() throws -> [GPXFileItem] {
@@ -172,9 +533,39 @@ private struct GPXFileItem: Identifiable, Hashable {
             .filter { $0.pathExtension.lowercased() == "gpx" }
             .map { url in
                 let relativePath = url.path.replacingOccurrences(of: baseURL.path + "/", with: "")
-                return GPXFileItem(relativePath: relativePath, url: url)
+                let item = GPXFileItem(
+                    relativePath: relativePath,
+                    url: url,
+                    normalizedSearchText: ""
+                )
+
+                return GPXFileItem(
+                    relativePath: relativePath,
+                    url: url,
+                    normalizedSearchText: item.searchText
+                        .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+                )
             }
             .sorted { $0.relativePath.localizedStandardCompare($1.relativePath) == .orderedAscending }
+    }
+
+    private static func cleanedFolderName(_ name: String) -> String {
+        name.replacingOccurrences(
+            of: #"^\d+[\s_-]*"#,
+            with: "",
+            options: .regularExpression
+        )
+    }
+
+    private static func cleanedFileName(_ name: String) -> String {
+        let withoutTrailingNumber = name.replacingOccurrences(
+            of: #"([_-]?\d+)+$"#,
+            with: "",
+            options: .regularExpression
+        )
+
+        return cleanedFolderName(withoutTrailingNumber)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "_- "))
     }
 }
 
@@ -183,9 +574,11 @@ private enum GPXParserError: Error {
 }
 
 private final class GPXParser: NSObject, XMLParserDelegate {
-    private var points: [CLLocationCoordinate2D] = []
+    private var segments: [[CLLocationCoordinate2D]] = []
+    private var currentSegment: [CLLocationCoordinate2D] = []
+    private var currentContainer: String?
 
-    static func parse(contentsOf url: URL) throws -> [CLLocationCoordinate2D] {
+    static func parse(contentsOf url: URL) throws -> [[CLLocationCoordinate2D]] {
         guard let parser = XMLParser(contentsOf: url) else {
             throw GPXParserError.invalidFile
         }
@@ -194,7 +587,7 @@ private final class GPXParser: NSObject, XMLParserDelegate {
         parser.delegate = delegate
 
         if parser.parse() {
-            return delegate.points
+            return delegate.segments
         } else {
             throw parser.parserError ?? GPXParserError.invalidFile
         }
@@ -207,19 +600,71 @@ private final class GPXParser: NSObject, XMLParserDelegate {
         qualifiedName qName: String?,
         attributes attributeDict: [String : String] = [:]
     ) {
-        guard elementName == "trkpt" || elementName == "rtept" || elementName == "wpt" else {
+        if elementName == "trk" || elementName == "trkseg" || elementName == "rte" {
+            closeCurrentSegment()
+            currentContainer = elementName
             return
         }
 
+        if elementName == "wpt" {
+            closeCurrentSegment()
+            if let coordinate = Self.coordinate(from: attributeDict) {
+                segments.append([coordinate])
+            }
+            return
+        }
+
+        guard elementName == "trkpt" || elementName == "rtept" else {
+            return
+        }
+
+        guard let coordinate = Self.coordinate(from: attributeDict) else {
+            return
+        }
+
+        currentSegment.append(coordinate)
+    }
+
+    func parser(
+        _ parser: XMLParser,
+        didEndElement elementName: String,
+        namespaceURI: String?,
+        qualifiedName qName: String?
+    ) {
+        guard elementName == "trkseg" || elementName == "trk" || elementName == "rte" else {
+            return
+        }
+
+        closeCurrentSegment()
+
+        if currentContainer == elementName {
+            currentContainer = nil
+        }
+    }
+
+    func parserDidEndDocument(_ parser: XMLParser) {
+        closeCurrentSegment()
+    }
+
+    private func closeCurrentSegment() {
+        guard !currentSegment.isEmpty else {
+            return
+        }
+
+        segments.append(currentSegment)
+        currentSegment.removeAll(keepingCapacity: true)
+    }
+
+    private static func coordinate(from attributes: [String : String]) -> CLLocationCoordinate2D? {
         guard
-            let latString = attributeDict["lat"],
-            let lonString = attributeDict["lon"],
+            let latString = attributes["lat"],
+            let lonString = attributes["lon"],
             let latitude = Double(latString),
             let longitude = Double(lonString)
         else {
-            return
+            return nil
         }
 
-        points.append(CLLocationCoordinate2D(latitude: latitude, longitude: longitude))
+        return CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
     }
 }
