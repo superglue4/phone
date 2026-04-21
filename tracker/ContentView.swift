@@ -10,12 +10,44 @@ import Foundation
 import MapKit
 
 struct ContentView: View {
+    @State private var gpxFiles: [GPXFileItem] = []
+    @State private var selectedFile: GPXFileItem?
     @State private var routeCoordinates: [CLLocationCoordinate2D] = []
     @State private var cameraPosition: MapCameraPosition = .automatic
-    @State private var loadMessage = "sample.gpx를 프로젝트에 추가하면 경로가 표시됩니다."
+    @State private var loadMessage = "`gpx` 폴더를 프로젝트 리소스로 추가하면 목록이 표시됩니다."
 
     var body: some View {
         VStack(spacing: 12) {
+            HStack {
+                Menu {
+                    if gpxFiles.isEmpty {
+                        Text("gpx 폴더에서 파일을 찾지 못했습니다.")
+                    } else {
+                        ForEach(groupedFiles.keys.sorted(), id: \.self) { group in
+                            Section(group) {
+                                ForEach(groupedFiles[group] ?? []) { file in
+                                    Button(file.displayName) {
+                                        loadGPXFile(file)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } label: {
+                    Label(selectedFile?.relativePath ?? "GPX 파일 선택", systemImage: "folder")
+                        .lineLimit(1)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .buttonStyle(.bordered)
+
+                if let selectedFile {
+                    Button("다시 읽기") {
+                        loadGPXFile(selectedFile)
+                    }
+                    .buttonStyle(.bordered)
+                }
+            }
+
             Map(position: $cameraPosition) {
                 if routeCoordinates.count == 1, let coordinate = routeCoordinates.first {
                     Marker("Start", coordinate: coordinate)
@@ -40,29 +72,51 @@ struct ContentView: View {
         }
         .padding()
         .task {
-            loadGPX()
+            discoverGPXFiles()
         }
     }
 
-    private func loadGPX() {
-        guard let url = Bundle.main.url(forResource: "sample", withExtension: "gpx") else {
-            loadMessage = "Xcode에서 sample.gpx를 tracker 타깃에 추가하세요."
-            return
+    private var groupedFiles: [String: [GPXFileItem]] {
+        Dictionary(grouping: gpxFiles, by: \.groupName)
+    }
+
+    private func discoverGPXFiles() {
+        do {
+            gpxFiles = try GPXFileItem.discoverAll()
+
+            guard let first = gpxFiles.first else {
+                routeCoordinates = []
+                selectedFile = nil
+                loadMessage = "Xcode에서 `gpx` 폴더를 tracker 타깃 리소스로 추가하세요."
+                return
+            }
+
+            loadGPXFile(first)
+        } catch {
+            routeCoordinates = []
+            selectedFile = nil
+            loadMessage = "GPX 목록 읽기 실패: \(error.localizedDescription)"
         }
+    }
+
+    private func loadGPXFile(_ file: GPXFileItem) {
+        selectedFile = file
 
         do {
-            let points = try GPXParser.parse(contentsOf: url)
+            let points = try GPXParser.parse(contentsOf: file.url)
 
             guard !points.isEmpty else {
-                loadMessage = "GPX는 읽었지만 trkpt 좌표가 없습니다."
+                routeCoordinates = []
+                loadMessage = "\(file.relativePath): trkpt 좌표가 없습니다."
                 return
             }
 
             routeCoordinates = points
             cameraPosition = .rect(Self.mapRect(for: points))
-            loadMessage = "총 \(points.count)개 좌표를 지도에 표시했습니다."
+            loadMessage = "\(file.relativePath)에서 \(points.count)개 좌표를 표시했습니다."
         } catch {
-            loadMessage = "GPX 파싱 실패: \(error.localizedDescription)"
+            routeCoordinates = []
+            loadMessage = "\(file.relativePath) 파싱 실패: \(error.localizedDescription)"
         }
     }
 
@@ -79,6 +133,48 @@ struct ContentView: View {
         }
 
         return rect.insetBy(dx: -rect.size.width * 0.2 - 500, dy: -rect.size.height * 0.2 - 500)
+    }
+}
+
+private struct GPXFileItem: Identifiable, Hashable {
+    let relativePath: String
+    let url: URL
+
+    var id: String { relativePath }
+    var displayName: String { url.deletingPathExtension().lastPathComponent }
+
+    var groupName: String {
+        let folder = (relativePath as NSString).deletingLastPathComponent
+        return folder.isEmpty || folder == "." ? "기타" : folder
+    }
+
+    static func discoverAll() throws -> [GPXFileItem] {
+        guard let baseURL = Bundle.main.resourceURL?.appendingPathComponent("gpx", isDirectory: true) else {
+            return []
+        }
+
+        let fileManager = FileManager.default
+
+        guard fileManager.fileExists(atPath: baseURL.path) else {
+            return []
+        }
+
+        guard let enumerator = fileManager.enumerator(
+            at: baseURL,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return []
+        }
+
+        return enumerator
+            .compactMap { $0 as? URL }
+            .filter { $0.pathExtension.lowercased() == "gpx" }
+            .map { url in
+                let relativePath = url.path.replacingOccurrences(of: baseURL.path + "/", with: "")
+                return GPXFileItem(relativePath: relativePath, url: url)
+            }
+            .sorted { $0.relativePath.localizedStandardCompare($1.relativePath) == .orderedAscending }
     }
 }
 
